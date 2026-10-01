@@ -227,37 +227,53 @@ public class V2HttpCall extends HttpSolrCall {
   }
 
   private void ensureRequest() throws Exception {
+    ensureRequest(false);
+  }
+
+  /**
+   * @param mayStillNeedOriginalBody true if this request might still fall through to {@link
+   *     #sendRemoteProxy()} afterward (only {@link #handleAdminOrRemoteRequest()}'s call), which
+   *     needs the original request body intact to forward it (e.g. a form-urlencoded POST). Every
+   *     other caller is guaranteed to be handled fully locally - either by {@link
+   *     #initAdminRequest} itself, or by {@link #handleAdmin} with no remote-proxy fallback - so
+   *     it's safe for them to read the body as before.
+   */
+  private void ensureRequest(boolean mayStillNeedOriginalBody) throws Exception {
     if (solrReq == null) {
-      // Query-string params only - never read the body here. This runs for every Jersey dispatch
-      // attempt, including ones that 404 and fall through to sendRemoteProxy(), which needs the
-      // original request body intact to forward it (e.g. a form-urlencoded POST).
-      //
-      // Mirrors the override pattern SolrRequestParsers#buildRequestFrom uses for a real request
-      // (getCoreContainer/getCommands/getPathTemplateValues/getHttpSolrCall all delegate to the
-      // owning HttpSolrCall) - admin resources like GetNodeSystemInfo rely on getCoreContainer()
-      // in particular, which SolrQueryRequestBase can otherwise only derive from a non-null core.
-      solrReq =
-          new SolrQueryRequestBase(null, SolrRequestParsers.parseQueryString(req.getQueryString())) {
-            @Override
-            public CoreContainer getCoreContainer() {
-              return cores;
-            }
+      if (mayStillNeedOriginalBody) {
+        // Query-string params only - never read the body here, see the javadoc above.
+        //
+        // Mirrors the override pattern SolrRequestParsers#buildRequestFrom uses for a real
+        // request (getCoreContainer/getCommands/getPathTemplateValues/getHttpSolrCall all
+        // delegate to the owning HttpSolrCall) - admin resources like GetNodeSystemInfo rely on
+        // getCoreContainer() in particular, which SolrQueryRequestBase can otherwise only derive
+        // from a non-null core.
+        solrReq =
+            new SolrQueryRequestBase(
+                null, SolrRequestParsers.parseQueryString(req.getQueryString())) {
+              @Override
+              public CoreContainer getCoreContainer() {
+                return cores;
+              }
 
-            @Override
-            public List<CommandOperation> getCommands(boolean validateInput) {
-              return V2HttpCall.this.getCommands(validateInput);
-            }
+              @Override
+              public List<CommandOperation> getCommands(boolean validateInput) {
+                return V2HttpCall.this.getCommands(validateInput);
+              }
 
-            @Override
-            public Map<String, String> getPathTemplateValues() {
-              return getUrlParts();
-            }
+              @Override
+              public Map<String, String> getPathTemplateValues() {
+                return getUrlParts();
+              }
 
-            @Override
-            public HttpSolrCall getHttpSolrCall() {
-              return V2HttpCall.this;
-            }
-          };
+              @Override
+              public HttpSolrCall getHttpSolrCall() {
+                return V2HttpCall.this;
+              }
+            };
+      } else {
+        solrReq = SolrRequestParsers.DEFAULT.parse(null, path, req);
+      }
     }
     solrReq.getContext().put(CoreContainer.class.getName(), cores);
 
@@ -345,7 +361,9 @@ public class V2HttpCall extends HttpSolrCall {
       ApplicationHandler jerseyHandler,
       PluginBag<SolrRequestHandler> requestHandlers,
       SolrQueryResponse rsp) {
-    return invokeJerseyRequest(cores, core, jerseyHandler, requestHandlers, rsp, Map.of());
+    // Called only from handleAdmin(), which has no sendRemoteProxy() fallback - safe to read the
+    // body as before.
+    return invokeJerseyRequest(cores, core, jerseyHandler, requestHandlers, rsp, false, Map.of());
   }
 
   private boolean invokeJerseyRequest(
@@ -354,9 +372,10 @@ public class V2HttpCall extends HttpSolrCall {
       ApplicationHandler jerseyHandler,
       PluginBag<SolrRequestHandler> requestHandlers,
       SolrQueryResponse rsp,
+      boolean mayStillNeedOriginalBody,
       Map<String, String> additionalProperties) {
     try {
-      ensureRequest();
+      ensureRequest(mayStillNeedOriginalBody);
     } catch (Exception e) {
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
     }
@@ -423,6 +442,7 @@ public class V2HttpCall extends HttpSolrCall {
             cores.getJerseyApplicationHandler(),
             cores.getRequestHandlers(),
             solrResp,
+            /* mayStillNeedOriginalBody= */ true,
             suppressNotFoundProp);
     if (jerseyResourceFound) {
       logAndFlushAdminRequest(solrResp);
@@ -477,6 +497,7 @@ public class V2HttpCall extends HttpSolrCall {
               core.getJerseyApplicationHandler(),
               core.getRequestHandlers(),
               rsp,
+              /* mayStillNeedOriginalBody= */ false,
               suppressNotFoundProp);
       if (!resourceFound) {
         // Whatever this API call is, it's not a core-level request so make sure we free our
