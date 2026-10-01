@@ -41,6 +41,7 @@ import net.jcip.annotations.ThreadSafe;
 import org.apache.solr.client.solrj.SolrRequest;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.CommonParams;
+import org.apache.solr.common.util.CommandOperation;
 import org.apache.solr.common.util.JsonSchemaValidator;
 import org.apache.solr.common.util.PathTrie;
 import org.apache.solr.common.util.SuppressForbidden;
@@ -52,6 +53,7 @@ import org.apache.solr.handler.RequestHandlerUtils;
 import org.apache.solr.jersey.RequestContextKeys;
 import org.apache.solr.jersey.container.ContainerRequestUtils;
 import org.apache.solr.request.SolrQueryRequest;
+import org.apache.solr.request.SolrQueryRequestBase;
 import org.apache.solr.request.SolrRequestHandler;
 import org.apache.solr.response.QueryResponseWriter;
 import org.apache.solr.response.SolrQueryResponse;
@@ -226,7 +228,36 @@ public class V2HttpCall extends HttpSolrCall {
 
   private void ensureRequest() throws Exception {
     if (solrReq == null) {
-      solrReq = SolrRequestParsers.DEFAULT.parse(null, path, req);
+      // Query-string params only - never read the body here. This runs for every Jersey dispatch
+      // attempt, including ones that 404 and fall through to sendRemoteProxy(), which needs the
+      // original request body intact to forward it (e.g. a form-urlencoded POST).
+      //
+      // Mirrors the override pattern SolrRequestParsers#buildRequestFrom uses for a real request
+      // (getCoreContainer/getCommands/getPathTemplateValues/getHttpSolrCall all delegate to the
+      // owning HttpSolrCall) - admin resources like GetNodeSystemInfo rely on getCoreContainer()
+      // in particular, which SolrQueryRequestBase can otherwise only derive from a non-null core.
+      solrReq =
+          new SolrQueryRequestBase(null, SolrRequestParsers.parseQueryString(req.getQueryString())) {
+            @Override
+            public CoreContainer getCoreContainer() {
+              return cores;
+            }
+
+            @Override
+            public List<CommandOperation> getCommands(boolean validateInput) {
+              return V2HttpCall.this.getCommands(validateInput);
+            }
+
+            @Override
+            public Map<String, String> getPathTemplateValues() {
+              return getUrlParts();
+            }
+
+            @Override
+            public HttpSolrCall getHttpSolrCall() {
+              return V2HttpCall.this;
+            }
+          };
     }
     solrReq.getContext().put(CoreContainer.class.getName(), cores);
 

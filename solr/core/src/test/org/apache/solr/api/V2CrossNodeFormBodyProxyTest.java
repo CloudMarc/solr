@@ -30,18 +30,17 @@ import org.junit.Test;
 
 /**
  * Reproduces a regression introduced by this branch's {@code ensureRequest()}: a form-urlencoded
- * body does not survive {@code V2HttpCall}'s internal RETRY when a freshly-created collection is
- * queried cross-node before the remote node's cached cluster state has picked up the replica
- * placement.
+ * body does not survive {@link org.apache.solr.servlet.HttpSolrCall#sendRemoteProxy()} when a
+ * request is routed to a node with no local core for the target collection.
  *
- * <p>Sequence: {@code extractRemotePath()} can't resolve a remote URL yet (stale cache), so it
- * sets {@code action = RETRY} without returning; execution falls through to {@code
- * initAdminRequest(path)}, whose new {@code ensureRequest()} call reads and drains the
- * form-urlencoded body, then overwrites {@code action} back to {@code ADMIN}. {@code
- * SolrServlet.dispatch()}'s RETRY handling then re-invokes {@code V2HttpCall.init()} on a new
- * instance but the same underlying {@code HttpServletRequest} - whose body is now empty. This
- * does not happen on {@code main} without this branch, since nothing reads the body at that
- * point.
+ * <p>Sequence, confirmed via direct tracing: the receiving node correctly takes the {@code
+ * ADMIN_OR_REMOTEPROXY} path. {@code invokeJerseyRequest()} calls the new {@code ensureRequest()}
+ * first, which reads and drains the form-urlencoded body while attempting to match a container-
+ * level Jersey admin resource - {@code /select} isn't one, so this 404s and falls through to {@code
+ * sendRemoteProxy()}, which forwards the now-bodyless request to the node that actually hosts the
+ * collection. That node's own, unmodified {@code parseRequest()} then tries to read the form body
+ * and finds it empty. This does not happen on {@code main} without this branch, since nothing reads
+ * the body before deciding whether to proxy.
  */
 public class V2CrossNodeFormBodyProxyTest extends SolrCloudTestCase {
 
